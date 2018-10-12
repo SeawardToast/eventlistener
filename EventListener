@@ -1,0 +1,597 @@
+package com.stratos.core.listeners;
+
+import com.stratos.core.Main;
+import com.stratos.core.runnables.BombTimer;
+import com.stratos.core.runnables.MusicPlayer;
+import com.stratos.core.stats.SPlayer;
+import com.stratos.core.utils.CoreUtils;
+import com.stratos.core.utils.food.FoodInfo;
+import com.stratos.core.utils.pets.Pet;
+import com.stratos.core.utils.pets.PetManager;
+import com.stratos.core.utils.sql.SQLUtils;
+
+import com.stratos.core.utils.vehicles.Vehicle;
+import com.stratos.core.utils.vehicles.VehicleManager;
+import net.md_5.bungee.api.ChatColor;
+import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
+import org.bukkit.Material;
+import org.bukkit.Sound;
+
+import org.bukkit.craftbukkit.v1_13_R2.entity.CraftEntity;
+import org.bukkit.entity.Item;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.*;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.event.player.*;
+import org.bukkit.event.server.PluginDisableEvent;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.metadata.FixedMetadataValue;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.spigotmc.event.entity.EntityDismountEvent;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.Random;
+
+public class EventListener implements Listener {
+
+	public EventListener() {
+		Main.getPlugin().getServer().getPluginManager().registerEvents(this, Main.getPlugin());
+	}
+
+	@SuppressWarnings("deprecation")
+	@EventHandler
+	public void onPlayerInteract(PlayerInteractAtEntityEvent e) {
+		CoreUtils.debug(e.getPlayer(), "Clicked Entity");
+		if (e.getRightClicked().hasMetadata("vehicle")) {
+			e.setCancelled(true);
+			CoreUtils.debug(e.getPlayer(), "Clicked Vehicle");
+			Vehicle v = (Vehicle) ((CraftEntity) e.getRightClicked()).getHandle();
+			if (v.passengers.size() == 0) {
+				CoreUtils.debug(e.getPlayer(), "Vehicle empty");
+				if (v.getOwner() == null) {
+					CoreUtils.debug(e.getPlayer(), "No owner");
+					v.setOwner(e.getPlayer().getUniqueId());
+					e.getPlayer().setAllowFlight(true);
+					CoreUtils.debug(e.getPlayer(), "Added owner");
+				}
+				if (v.getOwner().equals(e.getPlayer().getUniqueId())) {
+					CoreUtils.debug(e.getPlayer(), "Owns Vehicle");
+					v.getBukkitEntity().setPassenger(e.getPlayer());
+					v.turnOnVehicle();
+					e.getPlayer().setMetadata("riding", new FixedMetadataValue(Main.getPlugin(), v.getType() + ""));
+					CoreUtils.addInvisiblePlayer(e.getPlayer());
+					CoreUtils.debug(e.getPlayer(), "Riding vehicle");
+				} else {
+					CoreUtils.getSPlayer(e.getPlayer()).sendMessage("&e&lStratos &f>&7 That Vehicle belongs to "
+							+ CoreUtils.getSPlayer(v.getOwner()).getName() + ".");
+				}
+			} else {
+				CoreUtils.getSPlayer(e.getPlayer())
+						.sendMessage("&e&lStratos &f>&7 There is already a player in there.");
+			}
+
+		}
+
+	}
+
+	@EventHandler
+	public void onCraftEvent(PrepareItemCraftEvent e) {
+		if (e.isRepair()) {
+			e.getInventory().setResult(null);
+		}
+		if (CoreUtils.isCraftingDisabled(e.getRecipe().getResult().getType())) {
+			Bukkit.broadcastMessage("Yes");
+			e.getInventory().setResult(null);
+		}
+	}
+
+	@EventHandler
+	public void onEntityDeath(EntityDeathEvent e) {
+		if (e.getEntity().getKiller() instanceof Player) {
+			SPlayer player = CoreUtils.getSPlayer(e.getEntity().getKiller());
+			player.getStatistics().addKill();
+		}
+	}
+
+	@EventHandler
+	public void onPlayerQuit(PlayerQuitEvent e) {
+		SQLUtils.update();
+		if (e.getPlayer().hasMetadata("riding")) {
+			e.getPlayer().removeMetadata("riding", Main.getPlugin());
+			CoreUtils.removeInvisiblePlayer(e.getPlayer().getName());
+			e.getPlayer().setAllowFlight(false);
+			e.getPlayer().setFlying(false);
+			VehicleManager.despawn(((Vehicle) ((CraftEntity) e.getPlayer().getVehicle()).getHandle()));
+			CoreUtils.addOfflineRidingPlayer(e.getPlayer());
+		}
+	}
+
+	@EventHandler
+	public void onPluginDisable(PluginDisableEvent e) {
+		if (e.getPlugin().getName().equals(Main.getPlugin().getName())) {
+			try {
+				SQLUtils.getSQL().update("UPDATE Server SET status='Offline',onlineplayers='0' WHERE name='"
+						+ Main.getServerName() + "'");
+			} catch (NullPointerException ex) {
+				ex.printStackTrace();
+				CoreUtils.sendPluginMessage(Bukkit.getOnlinePlayers().iterator().next(), "StratosStats", "Server",
+						"Offline", Main.getServerName());
+			}
+		}
+	}
+
+	@EventHandler
+	public void onPlayerTeleport(PlayerTeleportEvent e) {
+		if (e.getPlayer().hasMetadata("riding"))
+			e.setCancelled(true);
+	}
+
+	@SuppressWarnings("deprecation")
+	@EventHandler
+	public void onPlayerJoin(PlayerJoinEvent e) {
+
+		SQLUtils.update();
+		CoreUtils.getSPlayer(e.getPlayer()).getStatistics().addJoin();
+		CoreUtils.getSPlayer(e.getPlayer()).updateName(e.getPlayer().getName());
+
+		Bukkit.getScheduler().runTask(Main.getPlugin(), new MusicPlayer(e.getPlayer()));
+
+		if (CoreUtils.isOfflineRider(e.getPlayer())) {
+
+			Vehicle v = VehicleManager.spawnVehicle(VehicleManager.getStoredShip(e.getPlayer().getUniqueId()), e.getPlayer().getLocation());
+
+			Bukkit.getScheduler().runTaskLater(Main.getPlugin(), new BukkitRunnable() {
+
+				@Override
+				public void run() {
+					v.getBukkitEntity().setPassenger(e.getPlayer());
+					v.turnOnVehicle();
+					v.setOwner(e.getPlayer().getUniqueId());
+					e.getPlayer().setMetadata("riding",
+							new FixedMetadataValue(Main.getPlugin(), v.getType().getName()));
+					CoreUtils.removeOfflineRider(e.getPlayer());
+				}
+			}, 2);
+		}
+
+		for (Player player : Bukkit.getOnlinePlayers()) {
+			e.getPlayer().showPlayer(player);
+			player.showPlayer(e.getPlayer());
+		}
+		for (String s : CoreUtils.getInvisiblePlayers()) {
+			if (Bukkit.getPlayer(s) == null) {
+				CoreUtils.removeInvisiblePlayer(s);
+			} else {
+				e.getPlayer().hidePlayer(Bukkit.getPlayer(s));
+			}
+		}
+	}
+
+	@EventHandler
+	public void onEntityDamage(EntityDamageEvent e) {
+		if (e.getEntity() instanceof Player && e.getEntity().hasMetadata("riding")) {
+			e.setCancelled(true);
+		}
+	}
+
+
+	@SuppressWarnings("deprecation")
+	@EventHandler
+	public void onEntityDismount(EntityDismountEvent e) {
+		if (e.getEntity() instanceof Player && e.getEntity().hasMetadata("riding")) {
+			CoreUtils.debug(((Player) e.getEntity()), "Riding");
+			if (!e.getDismounted().isOnGround()
+					&& e.getDismounted().getLocation().add(0, -1, 0).getBlock().getType().equals(Material.AIR)
+					&& e.getDismounted().getLocation().add(0, -2, 0).getBlock().getType().equals(Material.AIR)) {
+				e.getEntity().sendMessage(CoreUtils
+						.colorize("&e&lSpaceships &f>&7 You can't get out here! You have to be on the ground first!"));
+				Vehicle vnew = VehicleManager.spawnVehicle(
+						((Vehicle) ((CraftEntity) e.getDismounted()).getHandle()).getType().getName(),
+						e.getDismounted().getLocation());
+				Bukkit.getScheduler().runTaskLater(Main.getPlugin(), new BukkitRunnable() {
+
+					@Override
+					public void run() {
+						vnew.getBukkitEntity().setPassenger(e.getEntity());
+						vnew.turnOnVehicle();
+						vnew.setOwner(e.getEntity().getUniqueId());
+						VehicleManager.despawn((Vehicle) ((CraftEntity) e.getDismounted()).getHandle());
+					}
+				}, 2);
+			} else {
+				if (e.getDismounted().getLocation().add(0, -1, 0).getBlock().getType().equals(Material.BARRIER)) {
+					e.getEntity().sendMessage(CoreUtils.colorize(
+							"&e&lSpaceships &f>&7 You can't get out here! You have to be on the ground first!"));
+					Vehicle vnew = VehicleManager.spawnVehicle(
+							((Vehicle) ((CraftEntity) e.getDismounted()).getHandle()).getType().getName(),
+							e.getDismounted().getLocation());
+					Bukkit.getScheduler().runTaskLater(Main.getPlugin(), new BukkitRunnable() {
+
+						@Override
+						public void run() {
+							vnew.getBukkitEntity().setPassenger(e.getEntity());
+							vnew.turnOnVehicle();
+							vnew.setOwner(e.getEntity().getUniqueId());
+							VehicleManager.despawn((Vehicle) ((CraftEntity) e.getDismounted()).getHandle());
+						}
+
+					}, 2);
+				} else {
+					CoreUtils.debug(((Player) e.getEntity()), "Dismount!");
+					e.getEntity().removeMetadata("riding", Main.getPlugin());
+					CoreUtils.removeInvisiblePlayer(((Player) e.getEntity()).getName());
+					VehicleManager.despawn((Vehicle) ((CraftEntity) e.getDismounted()).getHandle());
+					if (!((Player) e.getEntity()).getGameMode().equals(GameMode.CREATIVE))
+						((Player) e.getEntity()).setAllowFlight(false);
+
+				}
+			}
+		}
+	}
+
+	@EventHandler
+	public void onFoodLevelChange(FoodLevelChangeEvent e) {
+		if (e.getEntity().hasMetadata("riding"))
+			e.setCancelled(true);
+	}
+
+	@EventHandler
+	public void onPlayerDeath(PlayerDeathEvent e) {
+		CoreUtils.getSPlayer(e.getEntity()).getStatistics().addDeath();
+		CoreUtils.removeInvisiblePlayer(e.getEntity().getName());
+
+	}
+
+	@EventHandler
+	public void onBlockPlace(BlockPlaceEvent e) {
+		CoreUtils.getSPlayer(e.getPlayer()).getStatistics().addBlockPlaced();
+	}
+
+	@EventHandler
+	public void onInventoryClick(InventoryClickEvent e) {
+		if (e.getSlot() == -999)
+			return;
+		if (e.getClickedInventory() == null)
+			return;
+		if (!e.getClickedInventory().equals(e.getWhoClicked().getOpenInventory().getTopInventory()))
+			return;
+
+		if (ChatColor.stripColor(e.getClickedInventory().getTitle()).equals("Statistics")) {
+			e.setCancelled(true);
+			return;
+		}
+		if (e.getWhoClicked().hasMetadata("shipinv")) {
+			e.setCancelled(true);
+			if (e.getCurrentItem() == null)
+				return;
+			if (VehicleManager.getShip(ChatColor.stripColor(e.getCurrentItem().getItemMeta().getDisplayName())) == null)
+				return;
+			Vehicle v = VehicleManager.spawnVehicle(
+					ChatColor.stripColor(e.getCurrentItem().getItemMeta().getDisplayName()),
+					e.getWhoClicked().getLocation());
+			v.getBukkitEntity().setPassenger(((Player) e.getWhoClicked()));
+			v.turnOnVehicle();
+			v.setOwner(e.getWhoClicked().getUniqueId());
+			e.getWhoClicked().closeInventory();
+			e.getWhoClicked().removeMetadata("shipinv", Main.getPlugin());
+			e.getWhoClicked().setMetadata("riding", new FixedMetadataValue(Main.getPlugin(), v.getType() + ""));
+			CoreUtils.addInvisiblePlayer((Player) e.getWhoClicked());
+			CoreUtils.debug(((Player) e.getWhoClicked()), "Riding vehicle");
+			((Player) e.getWhoClicked()).setAllowFlight(true);
+		}
+		if (e.getWhoClicked().hasMetadata("petinv")) {
+			e.setCancelled(true);
+			if (e.getCurrentItem() == null)
+				return;
+			if (PetManager.getPetType(ChatColor.stripColor(e.getCurrentItem().getItemMeta().getDisplayName())) == null)
+				return;
+			Pet p = PetManager.spawnPet(((Player) e.getWhoClicked()),
+					ChatColor.stripColor(e.getCurrentItem().getItemMeta().getDisplayName()),
+					((Player) e.getWhoClicked()).getLocation());
+			e.getWhoClicked().closeInventory();
+			e.getWhoClicked().removeMetadata("petinv", Main.getPlugin());
+		}
+
+	}
+
+	@EventHandler
+	public void onInventoryClose(InventoryCloseEvent e) {
+		if (e.getPlayer().hasMetadata("shipinv")) {
+			e.getPlayer().removeMetadata("shipinv", Main.getPlugin());
+		}
+		if (e.getPlayer().hasMetadata("petinv")) {
+			e.getPlayer().removeMetadata("petinv", Main.getPlugin());
+		}
+	}
+
+	@EventHandler
+	public void PlayerItemHeldEvent(PlayerItemHeldEvent e) {
+		CoreUtils.returnStoredItem(e.getPlayer());
+		ItemStack quiver = null;
+		for (ItemStack i : e.getPlayer().getInventory().getContents()) {
+			try {
+				if (i == null)
+					continue;
+				if (i.getType().equals(CoreUtils.getItem("Quiver").getType())
+						&& i.getDurability() == CoreUtils.getItem("Quiver").getDurability()) {
+					quiver = i;
+
+					break;
+				}
+			} catch (NullPointerException ex) {
+
+			}
+		}
+
+		if (quiver != null) {
+			if (CoreUtils.inventoryContains(e.getPlayer().getInventory(), Material.ARROW)
+					|| CoreUtils.inventoryContains(e.getPlayer().getInventory(), Material.SPECTRAL_ARROW)) {
+				for (int g = 0; g != e.getPlayer().getInventory().getSize(); g++) {
+					ItemStack a = e.getPlayer().getInventory().getItem(g);
+					if (a == null)
+						continue;
+					if (a.getType().equals(Material.ARROW) || a.getType().equals(Material.SPECTRAL_ARROW)) {
+						try {
+							CoreUtils.addArrowToQuiver(quiver, a, a.getAmount());
+							e.getPlayer().getInventory().setItem(g, new ItemStack(Material.AIR));
+						} catch (NoSuchMethodException | ClassNotFoundException | IllegalAccessException
+								| IllegalArgumentException | InvocationTargetException e1) {
+							// TODO Auto-generated catch block
+							e1.printStackTrace();
+						}
+					}
+				}
+			}
+			
+			e.getPlayer().updateInventory();
+
+		}
+
+	}
+
+	@EventHandler
+	public void PlayerDropItemEvent(PlayerDropItemEvent e) {
+		CoreUtils.returnStoredItem(e.getPlayer());
+	}
+
+	@EventHandler
+	public void EntityShootBowEvent(EntityShootBowEvent e) {
+		if (e.getEntity() instanceof Player) {
+			CoreUtils.returnStoredItem((Player) e.getEntity());
+			ItemStack quiver = new ItemStack(Material.AIR);
+			for (ItemStack i : ((Player) e.getEntity()).getInventory().getContents()) {
+
+				if (i.getType().equals(CoreUtils.getItem("Quiver").getType())
+						&& i.getDurability() == CoreUtils.getItem("Quiver").getDurability()) {
+					quiver = i;
+					break;
+				}
+			}
+			CoreUtils.shootArrowFromQuiver(quiver, e.getProjectile(), 1);
+		}
+
+	}
+
+	@EventHandler
+	public void onPickupItem(PlayerPickupItemEvent e) {
+		if (e.getItem().getItemStack().getType().equals(Material.ARROW)
+				|| e.getItem().getItemStack().getType().equals(Material.SPECTRAL_ARROW)
+				|| e.getItem().getItemStack().getType().equals(Material.TIPPED_ARROW)) {
+			for (ItemStack i : e.getPlayer().getInventory().getContents()) {
+				try {
+					if (i == null)
+						continue;
+					if (i.getType().equals(CoreUtils.getItem("Quiver").getType())
+							&& i.getDurability() == CoreUtils.getItem("Quiver").getDurability()) {
+						CoreUtils.addArrowToQuiver(i, e.getItem(), e.getItem().getItemStack().getAmount());
+						e.getItem().remove();
+						break;
+					}
+				} catch (NullPointerException ex) {
+
+				} catch (NoSuchMethodException e1) {
+					// TODO Auto-generated catch block
+					e1.printStackTrace();
+				} catch (ClassNotFoundException e1) {
+					// TODO Auto-generated catch block
+					e1.printStackTrace();
+				} catch (IllegalAccessException e1) {
+					// TODO Auto-generated catch block
+					e1.printStackTrace();
+				} catch (IllegalArgumentException e1) {
+					// TODO Auto-generated catch block
+					e1.printStackTrace();
+				} catch (InvocationTargetException e1) {
+					// TODO Auto-generated catch block
+					e1.printStackTrace();
+				}
+			}
+			e.setCancelled(true);
+		}
+	}
+
+	@SuppressWarnings("deprecation")
+	@EventHandler
+	public void onPlayerInteract(PlayerInteractEvent e) {
+		if (e.getItem() == null || e.getItem().getType() == null)
+			return;
+		if (!(e.getAction().equals(Action.RIGHT_CLICK_AIR) || e.getAction().equals(Action.RIGHT_CLICK_BLOCK)))
+			return;
+		Player p = e.getPlayer();
+		if ((p.getItemInHand().getType().equals(Material.BOW))) {
+
+			if (CoreUtils.hasStoredItem(p.getUniqueId()))
+				return;
+			if (!(p.getItemInHand().getType().equals(Material.BOW)))
+				return;
+			ItemStack quiver = new ItemStack(Material.AIR);
+			for (ItemStack k : p.getInventory().getContents()) {
+				if (k.getType().equals(CoreUtils.getItem("Quiver").getType())
+						&& k.getDurability() == CoreUtils.getItem("Quiver").getDurability()) {
+					if (!(CoreUtils.getArrows(k) <= 0)) {
+						quiver = k;
+						break;
+					}
+					if (!(CoreUtils.getSpectralArrows(k) <= 0)) {
+						quiver = k;
+						break;
+					}
+
+				}
+			}
+			if (!(CoreUtils.getArrows(quiver) > 0) && !(CoreUtils.getSpectralArrows(quiver) > 0)
+					&& !(CoreUtils.getTippedArrows(quiver) > 0))
+				return;
+			int slot = p.getInventory().getSize() - 1;
+			try {
+				ItemStack pi = p.getInventory().getItem(slot);
+				ItemStack item = new ItemStack(pi.getType());
+				item.setDurability(pi.getDurability());
+				item.setAmount(pi.getAmount());
+				item.setItemMeta(pi.getItemMeta());
+				item.addEnchantments(pi.getEnchantments());
+				item.setData(pi.getData());
+				CoreUtils.storeItem(p, item);
+			} catch (NullPointerException ex) {
+				CoreUtils.storeItem(p, new ItemStack(Material.AIR));
+			}
+
+			if (CoreUtils.getSpectralArrows(quiver) > 0) {
+				p.getInventory().setItem(slot, new ItemStack(Material.SPECTRAL_ARROW, 1));
+			}
+			if (CoreUtils.getTippedArrows(quiver) > 0) {
+				p.getInventory().setItem(slot, CoreUtils.getNextTippedArrow(quiver));
+			}
+			if (CoreUtils.getArrows(quiver) > 0) {
+				p.getInventory().setItem(slot, new ItemStack(Material.SPECTRAL_ARROW, 1));
+			}
+
+		}
+
+		if (e.getAction().equals(Action.RIGHT_CLICK_BLOCK)) {
+			if (CoreUtils.isSpade(e.getItem().getType())) {
+				if (e.getClickedBlock().getType().equals(Material.GRASS)
+						|| e.getClickedBlock().getType().equals(Material.DIRT)) {
+					if (!e.getPlayer()
+							.hasPermission("stratos.path." + e.getItem().getType().toString().replace("_SPADE", "")))
+						e.setCancelled(true);
+				}
+			}
+
+			if (CoreUtils.isHoe(e.getItem().getType())) {
+				if (e.getClickedBlock().getType().equals(Material.GRASS)
+						|| e.getClickedBlock().getType().equals(Material.DIRT)) {
+					if (!e.getPlayer()
+							.hasPermission("stratos.til." + e.getItem().getType().toString().replace("_HOE", "")))
+						e.setCancelled(true);
+				}
+			}
+		}
+		if (e.getAction().equals(Action.RIGHT_CLICK_AIR)) {
+			if (e.getItem() == null)
+				return;
+
+			if (e.getItem().getType().equals(CoreUtils.getItem("REK").getType())
+					&& e.getItem().getDurability() == CoreUtils.getItem("REK").getDurability()) {
+				CoreUtils.openStatsInventory(e.getPlayer());
+				return;
+			}
+			if (!e.getItem().hasItemMeta())
+				return;
+			if (CoreUtils.isFood(e.getItem())) {
+				CoreUtils.debug(e.getPlayer(), "This is food.");
+
+				if (e.getPlayer().getFoodLevel() < 20 && !e.getPlayer().getGameMode().equals(GameMode.CREATIVE)) {
+					FoodInfo info = CoreUtils.getFood(e.getItem());
+					try {
+						e.getPlayer().setHealth(e.getPlayer().getHealth() + info.getHealingFactor());
+					} catch (IllegalArgumentException ex) {
+						e.getPlayer().setHealth(e.getPlayer().getMaxHealth());
+					}
+					e.getPlayer().setFoodLevel(e.getPlayer().getFoodLevel() + info.getHungerLevel());
+					if (info.getPotionEffects().size() != 0) {
+						for (PotionEffect p1 : info.getPotionEffects()) {
+							e.getPlayer().addPotionEffect(p1);
+						}
+					}
+					e.getPlayer().getWorld().playSound(e.getPlayer().getLocation(), Sound.ENTITY_PLAYER_BURP, 1, 1);
+					if (e.getItem().getAmount() > 1)
+						e.getItem().setAmount(e.getItem().getAmount() - 1);
+					else {
+						e.getPlayer().setItemInHand(new ItemStack(Material.AIR));
+					}
+				}
+				e.setCancelled(true);
+				return;
+			}
+			if (!e.getItem().getItemMeta().hasLore())
+				return;
+			if (CoreUtils.loreContains(e.getItem().getItemMeta().getLore(), "Explosive")) {
+
+				Item i = e.getPlayer().getWorld().dropItemNaturally(e.getPlayer().getEyeLocation(),
+						new ItemStack(e.getItem().getType()));
+				i.setVelocity(e.getPlayer().getEyeLocation().getDirection());
+				i.setPickupDelay(Integer.MAX_VALUE);
+				i.setInvulnerable(true);
+				Bukkit.getScheduler().runTaskLater(Main.getPlugin(), new BombTimer(i),
+						(new Random().nextInt(5) + 5) * 20);
+				if (e.getItem().getAmount() > 1)
+					e.getItem().setAmount(e.getItem().getAmount() - 1);
+				else
+					e.getPlayer().setItemInHand(null);
+				// e.getItem().setType(Material.AIR);
+			}
+		}
+	}
+
+	@SuppressWarnings("deprecation")
+	@EventHandler
+	public void onBlockBreak(BlockBreakEvent e) {
+		CoreUtils.getSPlayer(e.getPlayer()).getStatistics().addBlockBroken();
+		try {
+			if (e.getPlayer().getItemInHand() != null) {
+				ItemStack hand = e.getPlayer().getItemInHand();
+				if (!hand.getItemMeta().hasLore())
+					return;
+				if (!CoreUtils.hasUses(hand.getItemMeta()))
+					return;
+
+				CoreUtils.use(e.getPlayer());
+			}
+		} catch (NullPointerException ex) {
+		}
+
+	}
+
+	@EventHandler
+	public void onPlayerSwing(EntityDamageByEntityEvent e) {
+		if (e.getDamager() instanceof Player) {
+			if (e.getEntity().hasMetadata("vehicle")) {
+				e.setCancelled(true);
+				CoreUtils.debug(((Player) e.getDamager()), "Clicked Vehicle");
+				Vehicle v = (Vehicle) ((CraftEntity) e.getEntity()).getHandle();
+				if (v.getOwner().equals(((Player) e.getDamager()).getUniqueId())) {
+					VehicleManager.despawn(v);
+					((Player) e.getDamager()).sendMessage(CoreUtils.colorize("&e&lVehicles &f>&7 Stored vehicle."));
+
+				}
+			}
+
+		}
+		if (!(e.getDamager() instanceof Player))
+			return;
+		if (!CoreUtils.isSword(((Player) e.getDamager()).getItemInHand().getType()))
+			return;
+
+	}
+
+}
